@@ -1,0 +1,304 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>垂直跳び測定アプリ</title>
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;padding:15px;
+ font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+ background:#f1f5f9;color:#172033
+}
+h1{font-size:23px;margin:8px 0}
+p{line-height:1.6}
+.card{
+ background:white;border-radius:12px;
+ padding:15px;margin:14px 0;
+ box-shadow:0 2px 8px #0001
+}
+video{width:100%;background:#111;border-radius:8px}
+button{
+ border:0;border-radius:8px;
+ background:#2563eb;color:white;
+ padding:12px;font-size:15px;
+ margin:4px;cursor:pointer
+}
+button:disabled{opacity:.4}
+.green{background:#059669}
+.red{background:#dc2626}
+.gray{background:#64748b}
+.orange{background:#ea580c}
+.controls{display:flex;flex-wrap:wrap;justify-content:center}
+.time{text-align:center;font-size:22px;font-weight:bold}
+.result{
+ font-size:35px;font-weight:bold;
+ text-align:center;color:#059669
+}
+input[type=file]{width:100%;padding:10px}
+input[type=range]{width:100%}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:10px 5px;border-bottom:1px solid #ddd;text-align:center}
+small{color:#64748b}
+.notice{background:#fff7ed;padding:12px;border-radius:8px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<h1>🏃 垂直跳び測定アプリ</h1>
+<p>動画から離地・着地を指定してジャンプ高を測定します。</p>
+
+<div class="card">
+<h3>① 動画を読み込む</h3>
+<input type="file" id="file" accept="video/*">
+<video id="video" playsinline preload="auto"></video>
+<p id="status">動画を選択してください。</p>
+</div>
+
+<div class="card">
+<h3>② コマ送りで位置を決める</h3>
+<div class="controls">
+<button onclick="moveFrame(-1)">◀ 1コマ戻す</button>
+<button onclick="togglePlay()" id="playBtn">▶ 再生</button>
+<button onclick="moveFrame(1)">1コマ進む ▶</button>
+</div>
+<label>コマ送り間隔</label>
+<select id="fps">
+<option value="30">30fps</option>
+<option value="60" selected>60fps</option>
+<option value="120">120fps</option>
+<option value="240">240fps</option>
+</select>
+<input type="range" id="seek" min="0" max="1000" value="0">
+<div class="time" id="current">0.000 秒</div>
+<small>撮影時のフレームレートを選択してください。動画の実際のフレーム位置と完全に一致するとは限りません。</small>
+</div>
+
+<div class="card">
+<h3>③ 離地と着地を指定</h3>
+<div class="controls">
+<button class="orange" onclick="setTakeoff()">離地を指定</button>
+<button class="green" onclick="setLanding()">着地を指定</button>
+</div>
+<p>離地時刻：<b id="takeoffText">未指定</b></p>
+<p>着地時刻：<b id="landingText">未指定</b></p>
+<button class="gray" onclick="clearPoints()">指定をやり直す</button>
+</div>
+
+<div class="card">
+<h3>④ 測定結果</h3>
+<p>滞空時間</p>
+<div class="time" id="flight">-- 秒</div>
+<p>ジャンプ高</p>
+<div class="result" id="height">-- cm</div>
+<div class="controls">
+<button class="green" onclick="saveResult()">この結果を記録</button>
+</div>
+<div class="notice">
+<b>測定時の注意</b>
+<br>
+空中で膝を上げる動作だけで、必ず滞空時間が伸びるわけではありません。
+ただし、着地時に膝を大きく曲げたり、足を引き上げたりすると、足が地面に触れるまでの時間が長くなり、計算上のジャンプ高が実際より高く出る場合があります。
+<br>
+離地と着地の姿勢をできるだけそろえて比較してください。
+</div>
+</div>
+
+<div class="card">
+<h3>⑤ 3回の測定記録</h3>
+<table>
+<thead>
+<tr><th>回数</th><th>滞空時間</th><th>ジャンプ高</th></tr>
+</thead>
+<tbody id="records"></tbody>
+</table>
+<p id="average"></p>
+<p id="best"></p>
+<div class="controls">
+<button onclick="downloadCSV()">CSV保存</button>
+<button class="red" onclick="resetRecords()">記録を消去</button>
+</div>
+</div>
+
+<script>
+const video=document.getElementById("video");
+const file=document.getElementById("file");
+const seek=document.getElementById("seek");
+const fps=document.getElementById("fps");
+let takeoff=null;
+let landing=null;
+let records=[];
+let objectURL=null;
+
+function fmt(n){
+ return Number(n).toFixed(3);
+}
+function setStatus(s){
+ document.getElementById("status").textContent=s;
+}
+function duration(){
+ return Number.isFinite(video.duration)?video.duration:0;
+}
+function updateTime(){
+ document.getElementById("current").textContent=
+ fmt(video.currentTime)+" 秒";
+ if(duration()>0){
+  seek.value=Math.round(video.currentTime/duration()*1000);
+ }
+ document.getElementById("playBtn").textContent=
+ video.paused?"▶ 再生":"⏸ 停止";
+}
+file.addEventListener("change",()=>{
+ const f=file.files[0];
+ if(!f)return;
+ video.pause();
+ if(objectURL)URL.revokeObjectURL(objectURL);
+ objectURL=URL.createObjectURL(f);
+ video.src=objectURL;
+ video.load();
+ clearPoints();
+ setStatus("読み込み中...");
+});
+video.addEventListener("loadedmetadata",()=>{
+ setStatus("動画を読み込みました。長さ："+fmt(duration())+" 秒");
+ updateTime();
+});
+video.addEventListener("timeupdate",updateTime);
+video.addEventListener("seeked",updateTime);
+video.addEventListener("play",updateTime);
+video.addEventListener("pause",updateTime);
+video.addEventListener("error",()=>{
+ setStatus("動画を再生できません。別の動画を選んでください。");
+});
+seek.addEventListener("input",()=>{
+ if(duration()>0){
+  video.pause();
+  video.currentTime=Number(seek.value)/1000*duration();
+ }
+});
+function togglePlay(){
+ if(!video.src)return alert("動画を選択してください");
+ if(video.paused){
+  const p=video.play();
+  if(p)p.catch(()=>setStatus("再生できませんでした。"));
+ }else video.pause();
+}
+function moveFrame(direction){
+ if(!duration())return alert("動画を選択してください");
+ video.pause();
+ const step=1/Number(fps.value);
+ video.currentTime=Math.max(0,Math.min(duration(),
+ video.currentTime+direction*step));
+}
+function setTakeoff(){
+ if(!duration())return alert("動画を選択してください");
+ video.pause();
+ takeoff=video.currentTime;
+ document.getElementById("takeoffText").textContent=
+ fmt(takeoff)+" 秒";
+ calculate();
+}
+function setLanding(){
+ if(!duration())return alert("動画を選択してください");
+ video.pause();
+ landing=video.currentTime;
+ document.getElementById("landingText").textContent=
+ fmt(landing)+" 秒";
+ calculate();
+}
+function clearPoints(){
+ takeoff=null;landing=null;
+ document.getElementById("takeoffText").textContent="未指定";
+ document.getElementById("landingText").textContent="未指定";
+ document.getElementById("flight").textContent="-- 秒";
+ document.getElementById("height").textContent="-- cm";
+}
+function getResult(){
+ if(takeoff===null||landing===null||landing<=takeoff)
+ return null;
+ const t=landing-takeoff;
+ const h=9.80665*t*t/8*100;
+ return {t,h};
+}
+function calculate(){
+ const r=getResult();
+ if(!r){
+  document.getElementById("flight").textContent="-- 秒";
+  document.getElementById("height").textContent="-- cm";
+  return;
+ }
+ document.getElementById("flight").textContent=fmt(r.t)+" 秒";
+ document.getElementById("height").textContent=r.h.toFixed(1)+" cm";
+}
+function saveResult(){
+ const r=getResult();
+ if(!r)return alert("離地と着地を正しい順番で指定してください");
+ if(records.length>=3){
+  return alert("記録は3回までです。新しく測定する場合は記録を消去してください。");
+ }
+ records.push({time:r.t,height:r.h});
+ renderRecords();
+ alert(records.length+"回目の測定を記録しました");
+}
+function renderRecords(){
+ const tbody=document.getElementById("records");
+ tbody.innerHTML="";
+ for(let i=0;i<3;i++){
+  const tr=document.createElement("tr");
+  const r=records[i];
+  const values=[
+   String(i+1),
+   r?fmt(r.time)+" 秒":"--",
+   r?r.height.toFixed(1)+" cm":"--"
+  ];
+  values.forEach(v=>{
+   const td=document.createElement("td");
+   td.textContent=v;
+   tr.appendChild(td);
+  });
+  tbody.appendChild(tr);
+ }
+ const avg=document.getElementById("average");
+ const best=document.getElementById("best");
+ if(records.length){
+  const heights=records.map(r=>r.height);
+  avg.textContent="平均："+(
+   heights.reduce((a,b)=>a+b,0)/heights.length
+  ).toFixed(1)+" cm";
+  best.textContent="最高："+Math.max(...heights).toFixed(1)+" cm";
+ }else{
+  avg.textContent="平均：-- cm";
+  best.textContent="最高：-- cm";
+ }
+}
+function resetRecords(){
+ if(!confirm("3回分の記録を消去しますか？"))return;
+ records=[];
+ renderRecords();
+ clearPoints();
+}
+function downloadCSV(){
+ if(!records.length)return alert("先に測定を記録してください");
+ const rows=[
+  ["回数","滞空時間(秒)","ジャンプ高(cm)"],
+  ...records.map((r,i)=>[
+   i+1,fmt(r.time),r.height.toFixed(1)
+  ])
+ ];
+ const csv="\uFEFF"+rows.map(r=>r.join(",")).join("\r\n");
+ const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement("a");
+ a.href=url;
+ a.download="vertical_jump_results.csv";
+ document.body.appendChild(a);
+ a.click();
+ a.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),10000);
+}
+renderRecords();
+</script>
+</body>
+</html>
